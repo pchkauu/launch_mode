@@ -1,0 +1,11 @@
+name: launch_mode
+description: Explicit, initialize-once launch modes for each Dart isolate, with simple foreground, background, and worker checks. Compatible with Flutter.
+version: 0.1.0
+repository: https://github.com/pchkauu/launch_mode
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.24.0
