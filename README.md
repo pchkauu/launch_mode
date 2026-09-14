@@ -1,156 +1,224 @@
 # launch_mode
 
-An explicit launch mode for each Dart isolate. Initialize it in an entry point,
-then let application methods choose their logic using the declared mode.
+Launch modes for Flutter entry points and background handlers. Initialize the
+mode automatically, then let application methods choose their logic using the
+current mode. Background scopes keep concurrent UI work in its original mode.
 
-Pure Dart, compatible with Flutter, with no runtime dependencies. Requires Dart
-3.0 or later.
+Supports Android, iOS, macOS, Windows, Linux, and Flutter Web. Requires Flutter
+3.10.0 or later and Dart 3.0 or later. Version 0.2.0 requires the Flutter SDK;
+standalone Dart programs can continue using 0.1.0.
 
 ## Installation
 
-Until the package is published, use a local path dependency:
+To use version 0.2.0 from GitHub, depend on the release tag:
 
 ```yaml
 dependencies:
   launch_mode:
-    path: ../launch_mode
+    git:
+      url: https://github.com/pchkauu/launch_mode.git
+      ref: v0.2.0
 ```
 
-Adjust the path to your checkout, then run `dart pub get` or `flutter pub get`.
+Run `flutter pub get` after adding the dependency.
 
 ## Main application entry point
 
 ```dart
+import 'package:flutter/material.dart';
 import 'package:launch_mode/launch_mode.dart';
 
 void main() {
-  LaunchMode.initialize(LaunchModeType.foreground);
+  LaunchMode.initializeAutomatically();
+  // current == foreground; Flutter bindings are not required by this call.
 
-  print(LaunchMode.current.name); // foreground
-  print(LaunchMode.isInitialized); // true
-  print(LaunchMode.isForeground); // true
-
-  // Continue application initialization and call runApp in a Flutter app.
+  runApp(const MaterialApp(home: Scaffold(body: Text('Hello, foreground!'))));
 }
 ```
 
-## Modes and initialization
+`initializeAutomatically()` is synchronous and returns `void`. It preserves an
+existing mode, including a background scope. Otherwise, Flutter Web becomes
+`foreground` without reading `RootIsolateToken`. On native platforms,
+`RootIsolateToken.instance != null` selects `foreground`; `null` selects `isolate`.
+The method does not create Flutter bindings.
+
+**A background root FlutterEngine must enter through `withBackgroundMode`.**
+Without that scope, automatic initialization classifies it as `foreground`.
+A root token identifies the root isolate, not whether its engine has a UI.
+
+## Modes and manual initialization
 
 | Mode | Meaning |
 | --- | --- |
-| `unspecified` | No mode has been initialized. |
+| `unspecified` | No mode has been initialized in this context. |
 | `foreground` | Main application entry point intended to run the UI. |
-| `background` | Background handler entry point. |
+| `background` | Background handler context. |
 | `isolate` | Separate computational worker entry point. |
 
-`LaunchMode.initialize(mode)` returns `void` and sets the value synchronously.
-Calling it again with the same mode is a no-op. A different mode throws
-`StateError` and leaves the first mode unchanged. Passing `unspecified` always
-throws `ArgumentError`, even after initialization.
-
-Before initialization, `LaunchMode.current` is `LaunchModeType.unspecified` and
-`isInitialized`, `isForeground`, `isBackground`, and `isIsolate` are all `false`.
-Use `LaunchMode.current.name` for the lowercase enum name and
-`!LaunchMode.isForeground` for its negation. The latter is also `true` before
-initialization, so it does not imply a known background or worker mode.
-
-## Background handler entry point
-
-Initialize the mode before running the handler's application logic:
+Manual initialization remains available:
 
 ```dart
+LaunchMode.initialize(LaunchModeType.foreground);
+LaunchMode.initializeAutomatically(); // Preserves foreground.
+```
+
+`initialize(mode)` returns `void` and sets the base mode synchronously. Repeating
+the same mode is a no-op. A different mode throws `StateError` and leaves the
+mode unchanged. Passing `unspecified` always throws `ArgumentError`.
+
+Before initialization, outside a background scope, `current` is `unspecified`
+and `isInitialized`, `isForeground`, `isBackground`, and `isIsolate` are all
+`false`. Reading a getter does not trigger automatic initialization. Use
+`LaunchMode.current.name` for the enum name and `!LaunchMode.isForeground` for
+negation; the latter is also `true` before initialization.
+
+## Background scopes
+
+```dart
+final result = await LaunchMode.withBackgroundMode(() async {
+  // current == background; isInitialized == true.
+  await Future<void>.delayed(const Duration(milliseconds: 1));
+  return LaunchMode.current.name; // background
+});
+// The surrounding context still has its original mode.
+```
+
+`withBackgroundMode<T>(T Function() body)` uses a Dart zone. The override survives
+`await` and async work registered inside the scope, even after the callback
+returns. Values and synchronous or asynchronous errors propagate unchanged.
+Nested scopes remain `background`.
+
+The isolate's base mode never changes through the scope. Concurrent work outside
+it continues to see its original mode. Inside a scope, `initialize(background)`
+and `initializeAutomatically()` are no-ops; another explicit mode throws
+`StateError`, and `unspecified` throws `ArgumentError`. These calls do not
+initialize an otherwise uninitialized base mode.
+
+The wrapper marks execution context. It does not create an isolate, schedule an
+operating system task, or initialize plugins.
+
+### Firebase Messaging
+
+Keep the registered handler as a top-level function with the entry-point pragma.
+Wrap its body, including application initialization:
+
+```dart
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:launch_mode/launch_mode.dart';
 
 @pragma('vm:entry-point')
-Future<void> backgroundEntryPoint() async {
-  LaunchMode.initialize(LaunchModeType.background);
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) =>
+    LaunchMode.withBackgroundMode(() async {
+      await Firebase.initializeApp(); // Supply your project's options if needed.
+      // Process message here; current == background, including after await.
+    });
 
-  // Initialize the services required by this handler, then do its work.
-}
+// In main(), after Firebase initialization:
+// FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 ```
 
-Adapt the callback signature and registration to your background integration.
-This example assumes an entry point in an isolate that has not already been
-initialized with another mode. Calling a background callback inside an existing
-foreground isolate does not create a separate launch mode; attempting to set
-`background` there throws `StateError`.
+This also works when the handler shares the application's foreground isolate.
+Follow [Firebase's background message setup](https://firebase.google.com/docs/cloud-messaging/flutter/receive-messages)
+for platform requirements and initialization options. Firebase Web Service
+Workers run outside the Flutter engine and are outside this package's scope.
+
+### Workmanager
+
+Keep the dispatcher as a top-level entry point and wrap each task callback body:
+
+```dart
+import 'package:launch_mode/launch_mode.dart';
+import 'package:workmanager/workmanager.dart';
+
+@pragma('vm:entry-point')
+void callbackDispatcher() {
+  Workmanager().executeTask((task, inputData) =>
+      LaunchMode.withBackgroundMode(() async {
+        // Initialize task services and perform the work here.
+        // current == background, including after await.
+        return true;
+      }));
+}
+
+// In main():
+// Workmanager().initialize(callbackDispatcher);
+```
+
+Put task initialization inside the wrapper. If the dispatcher itself runs shared
+application initialization, wrap that work too, before any call to
+`initializeAutomatically()`. See [Workmanager's setup](https://docs.page/fluttercommunity/flutter_workmanager/quickstart)
+for task registration and platform configuration. Firebase and Workmanager are
+application dependencies; this package does not depend on either.
 
 ## Computational worker
 
-Each new isolate starts as `unspecified`, even when its parent has initialized a
-mode. Initialize the worker independently:
+On native platforms, each new isolate starts as `unspecified`. Neither the
+parent's base mode nor its background zone is inherited:
 
 ```dart
 import 'dart:isolate';
 
 import 'package:launch_mode/launch_mode.dart';
 
-Future<void> main() async {
-  LaunchMode.initialize(LaunchModeType.foreground);
-
-  final workerMode = await Isolate.run(() {
-    LaunchMode.initialize(LaunchModeType.isolate);
-    return LaunchMode.current;
-  });
-
-  print(workerMode.name); // isolate
-  print(LaunchMode.current.name); // foreground
-}
+Future<LaunchModeType> checkWorkerMode() => Isolate.run(() {
+      LaunchMode.initializeAutomatically();
+      return LaunchMode.current; // isolate
+    });
 ```
 
-All Dart code, including the main application, runs in an isolate. The `isolate`
-mode specifically labels a computational worker; it does not detect the runtime
-isolate type. Static values are local to each isolate and are not shared between
-them. See [concurrency in Dart](https://dart.dev/language/concurrency).
+Initialize the application entry point separately. Its mode is unchanged when
+the worker completes. See [concurrency in Dart](https://dart.dev/language/concurrency).
+
+Flutter's `compute` executes in the current isolate on Web. Automatic
+initialization preserves that context's mode, or selects `foreground` if it is
+uninitialized. It does not turn Web computation into `isolate` mode. Explicitly
+initializing a conflicting mode still throws `StateError`. See
+[Flutter's isolate documentation](https://docs.flutter.dev/perf/isolates).
 
 ## Choose application logic
 
 ```dart
-void reportProgress(String message) {
-  if (!LaunchMode.isInitialized) {
-    throw StateError('Initialize the launch mode before reporting progress.');
-  }
-
-  if (LaunchMode.isForeground) {
-    print('Application progress: $message');
-  } else if (LaunchMode.isBackground) {
-    print('Background progress: $message');
-  } else if (LaunchMode.isIsolate) {
-    print('Worker progress: $message');
-  }
-}
+String progressChannel() => switch (LaunchMode.current) {
+      LaunchModeType.foreground => 'screen',
+      LaunchModeType.background => 'background-log',
+      LaunchModeType.isolate => 'worker-result',
+      LaunchModeType.unspecified => throw StateError('Initialize the launch mode.'),
+    };
 ```
 
-Replace these branches with your application's reporting policy. A mode declares
-the purpose of a launch; it does not confirm access to UI, platform channels, or
-any particular plugin. Those capabilities depend on the environment and its
-initialization.
-
-## Lifecycle and Web
-
-The value remains in memory for the lifetime of the isolate. It is not persisted
-between launches. Moving the application to the background or returning to the
-foreground does not change it. The package does not observe Flutter lifecycle
-events, initialize plugins, or provide a reset API.
-
-The library has no platform-specific imports and can be used on Web. The
-`Isolate.run` example above is for native platforms. Flutter's `compute` executes
-in the current isolate on Web. Initializing it with a different mode there
-conflicts with the existing mode. See
-[Flutter's isolate documentation](https://docs.flutter.dev/perf/isolates).
+A mode labels the purpose of execution. It does not guarantee access to UI,
+platform channels, or any particular plugin. The base mode lives only in the
+current isolate's memory. App lifecycle changes do not change it. There is no
+reset API, lifecycle observer, window inspection, isolate-name heuristic, or
+stack-trace detection.
 
 ## Example and checks
 
+The minimal Flutter Web application in `example/` uses the Flutter Web bootstrap
+introduced in Flutter 3.22. Its own minimum SDK is Flutter 3.22 / Dart 3.4; the
+library's minimum remains Flutter 3.10 / Dart 3.0.
+
+From the package root:
+
 ```sh
-dart pub get
-dart run example/launch_mode_example.dart
-dart analyze
-dart test
-dart format --output=none --set-exit-if-changed lib test example
-mkdir -p build
-dart compile js example/launch_mode_example.dart -o build/launch_mode_example.js
+flutter pub get
+flutter analyze
+flutter test
+flutter test --platform chrome
+dart format --output=none --set-exit-if-changed lib test example/lib
 ```
 
-Tests run on the Dart VM and use fresh isolates instead of resetting shared state.
-JavaScript compilation checks that the library and the basic example compile for
-Web; it does not verify browser behavior or Flutter plugin availability.
+Run or build the example:
+
+```sh
+cd example
+flutter pub get
+flutter run -d chrome
+flutter build web --release
+```
+
+Manual initialization tests use fresh native isolates without a reset API.
+Browser tests cover automatic initialization, Web `compute`, and background
+scopes. Tests of the wrappers do not verify Firebase delivery, Workmanager task
+execution, or plugin capabilities on physical devices.

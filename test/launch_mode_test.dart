@@ -3,8 +3,8 @@ library;
 
 import 'dart:isolate';
 
+import 'package:flutter_test/flutter_test.dart';
 import 'package:launch_mode/launch_mode.dart';
-import 'package:test/test.dart';
 
 const _uninitialized = (
   mode: LaunchModeType.unspecified,
@@ -80,6 +80,16 @@ void main() {
         expect(result, expected);
       });
 
+      test('automatic initialization preserves the manual mode', () async {
+        final result = await Isolate.run(() {
+          LaunchMode.initialize(mode);
+          LaunchMode.initializeAutomatically();
+          return _snapshot();
+        });
+
+        expect(result, expected);
+      });
+
       test('rejects unspecified and preserves the current mode', () async {
         final result = await Isolate.run(() {
           LaunchMode.initialize(mode);
@@ -123,6 +133,31 @@ void main() {
     expect(result.child.before, _uninitialized);
     expect(result.child.after, _states[LaunchModeType.isolate]);
     expect(result.after, _states[LaunchModeType.foreground]);
+    expect(_snapshot(), _uninitialized);
+  });
+
+  test('automatically initializes a child isolate', () async {
+    final result = await Isolate.run(() {
+      final before = _snapshot();
+      LaunchMode.initializeAutomatically();
+      LaunchMode.initializeAutomatically();
+      return (before: before, after: _snapshot());
+    });
+
+    expect(result.before, _uninitialized);
+    expect(result.after, _states[LaunchModeType.isolate]);
+    expect(_snapshot(), _uninitialized);
+  });
+
+  test('a child isolate does not inherit the background zone', () async {
+    final result = await LaunchMode.withBackgroundMode(() => Isolate.run(() {
+          final before = _snapshot();
+          LaunchMode.initializeAutomatically();
+          return (before: before, after: _snapshot());
+        }));
+
+    expect(result.before, _uninitialized);
+    expect(result.after, _states[LaunchModeType.isolate]);
     expect(_snapshot(), _uninitialized);
   });
 }
