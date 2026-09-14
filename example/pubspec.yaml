@@ -1,0 +1,16 @@
+name: launch_mode_example
+description: A minimal Flutter Web example of automatic launch mode initialization.
+publish_to: none
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  launch_mode:
+    path: ../
+
+dev_dependencies:
+  lints: ^6.0.0
